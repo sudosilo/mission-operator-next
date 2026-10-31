@@ -1,6 +1,9 @@
 // Mission Operator WiGLE relay for Wi-Fi and Bluetooth
-// Needs the WIGLE_AUTH environment variable in Vercel: the "Encoded for use" value
-// from the WiGLE account API page. Cached for a day per small grid cell to protect the quota.
+// The WiGLE auth value is read from the Redis key store (see api/_keys.js): the
+// "Encoded for use" value from the WiGLE account API page.
+// Cached for a day per small grid cell to protect the quota.
+
+const { getKey } = require("./_keys.js");
 
 async function fetchT(url, opts, ms) {
   const c = new AbortController();
@@ -17,12 +20,19 @@ function snap(v) {
 }
 
 module.exports = async function handler(req, res) {
-  const auth = process.env.WIGLE_AUTH;
-  if (!auth) {
+  const k = await getKey("WIGLE_AUTH");
+  if (!k.value) {
     res.setHeader("Cache-Control", "public, s-maxage=60");
-    res.status(200).json({ error: "key", missing: "WIGLE_AUTH", hint: "Set WIGLE_AUTH in the Vercel project environment. It is the \"Encoded for use\" value from your WiGLE account API page", items: [] });
+    res.status(200).json({
+      error: "key",
+      missing: "WIGLE_AUTH",
+      hint: "Add WIGLE_AUTH to the Redis key store. It is the \"Encoded for use\" value from your WiGLE account API page",
+      store: k.detail ? "redis unreachable" : "redis reachable, key absent",
+      items: [],
+    });
     return;
   }
+  const auth = k.value;
   const type = req.query.type === "bt" ? "bt" : "wifi";
   const lat = parseFloat(req.query.lat);
   const lon = parseFloat(req.query.lon);

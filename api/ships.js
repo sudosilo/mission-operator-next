@@ -1,7 +1,9 @@
 // Mission Operator ship relay
 // Opens the AISstream socket on the server for a few seconds, collects position reports,
 // closes it, and caches the result so the key never reaches the browser.
-// Needs the AISSTREAM_KEY environment variable in Vercel.
+// The AISstream key is read from the Redis key store (see api/_keys.js).
+
+const { getKey } = require("./_keys.js");
 
 function snap(v) {
   return Math.round(v * 2) / 2;
@@ -13,12 +15,19 @@ const MAX_SHIPS = 80;
 
 module.exports = async function handler(req, res) {
   try {
-    const key = process.env.AISSTREAM_KEY;
-    if (!key) {
+    const k = await getKey("AISSTREAM_KEY");
+    if (!k.value) {
       res.setHeader("Cache-Control", "public, s-maxage=60");
-      res.status(200).json({ error: "key", missing: "AISSTREAM_KEY", hint: "Set AISSTREAM_KEY in the Vercel project environment. It is a free key from aisstream.io", ships: [] });
+      res.status(200).json({
+        error: "key",
+        missing: "AISSTREAM_KEY",
+        hint: "Add AISSTREAM_KEY to the Redis key store. It is a free key from aisstream.io",
+        store: k.detail ? "redis unreachable" : "redis reachable, key absent",
+        ships: [],
+      });
       return;
     }
+    const key = k.value;
     const lat = parseFloat(req.query.lat);
     const lon = parseFloat(req.query.lon);
     if (!isFinite(lat) || !isFinite(lon)) {

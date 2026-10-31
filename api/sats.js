@@ -1,7 +1,9 @@
 // Mission Operator satellite relay
 // One N2YO call for everything overhead, sorted here into Starlink, GPS, weather,
 // debris and rocket bodies. Five layers cost one upstream call per grid cell.
-// Needs the N2YO_KEY environment variable in Vercel.
+// The N2YO key is read from the Redis key store (see api/_keys.js).
+
+const { getKey } = require("./_keys.js");
 
 async function fetchT(url, opts, ms) {
   const c = new AbortController();
@@ -30,12 +32,19 @@ function classify(name) {
 }
 
 module.exports = async function handler(req, res) {
-  const key = process.env.N2YO_KEY;
-  if (!key) {
+  const k = await getKey("N2YO_KEY");
+  if (!k.value) {
     res.setHeader("Cache-Control", "public, s-maxage=60");
-    res.status(200).json({ error: "key", missing: "N2YO_KEY", hint: "Set N2YO_KEY in the Vercel project environment. It is a free key from n2yo.com", sats: {} });
+    res.status(200).json({
+      error: "key",
+      missing: "N2YO_KEY",
+      hint: "Add N2YO_KEY to the Redis key store. It is a free key from n2yo.com",
+      store: k.detail ? "redis unreachable" : "redis reachable, key absent",
+      sats: {},
+    });
     return;
   }
+  const key = k.value;
   const lat = parseFloat(req.query.lat);
   const lon = parseFloat(req.query.lon);
   if (!isFinite(lat) || !isFinite(lon)) {
