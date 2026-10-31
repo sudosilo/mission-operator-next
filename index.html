@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#f3f7fc">
 <title>Mission Operator</title>
+<meta name="description" content="Mission Operator is a field scanner console for anyone curious about what is in the air and on the airwaves nearby. It asks for the device location, then scans and lists nearby signals by type.">
+<meta property="og:title" content="Mission Operator">
+<meta property="og:description" content="A field scanner console for what is in the air and on the airwaves nearby.">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Mission Operator">
+<meta name="twitter:description" content="A field scanner console for what is in the air and on the airwaves nearby.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='15' fill='%23f3f7fc' stroke='%231e6fd9' stroke-width='2'/%3E%3Cpath d='M16 6v6M16 20v6M6 16h6M20 16h6' stroke='%231e6fd9' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='2.5' fill='%23c97a00'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
 <style>
 :root{
@@ -88,12 +96,13 @@ select,.btn{font-family:inherit;font-size:11px;padding:5px 8px;border:1px solid 
 <div class="app">
   <div class="top">
     <div class="brand">MISSION <span>OPR</span></div>
+    <div class="gps" id="keysMiss" style="display:none;white-space:nowrap"></div>
     <div class="gps"><span class="dot" id="gpsDot"></span><span id="gpsText">ACQUIRING GPS</span></div>
     <div class="score" id="score">0 PTS</div>
   </div>
   <div class="tabs">
     <div class="tablist" id="tabs"></div>
-    <button class="scan" id="scanBtn">[ SCAN ]</button>
+    <button class="scan" id="scanBtn" aria-label="Scan for Wi-Fi and Bluetooth">[ SCAN ]</button>
   </div>
   <div class="main">
     <div class="side">
@@ -106,9 +115,9 @@ select,.btn{font-family:inherit;font-size:11px;padding:5px 8px;border:1px solid 
     </div>
     <div class="view">
       <div class="pane on" id="mapPane">
-        <div id="map"></div>
+        <div id="map" role="application" aria-label="Signal map"></div>
         <div class="acq" id="acq">ACQUIRING GPS<small>ALLOW LOCATION ACCESS</small></div>
-        <button class="recenter" id="recenter">CENTER</button>
+        <button class="recenter" id="recenter" aria-label="Recenter map on my location">CENTER</button>
         <div class="toasts" id="toasts"></div>
       </div>
       <div class="pane" id="logPane"></div>
@@ -120,7 +129,7 @@ select,.btn{font-family:inherit;font-size:11px;padding:5px 8px;border:1px solid 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 (function(){
-  var VERSION = "v2026.10.15.2";
+  var VERSION = "v2026.10.31";
   var KEY = "mission-operator-v3";
   var DAILY_SCANS = 25;
 
@@ -174,11 +183,23 @@ select,.btn{font-family:inherit;font-size:11px;padding:5px 8px;border:1px solid 
   function save(){ clearTimeout(saveT); saveT = setTimeout(function(){ try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e){} }, 400); }
 
   var $ = function(id){ return document.getElementById(id); };
+
+  // Global error boundary. Never let a thrown render error or a rejected promise
+  // leave the console frozen with no explanation.
+  window.addEventListener("error", function(e){ try { toast("APP ERROR: " + (e.message||"unknown"), "", "#d6304a"); } catch(x){} });
+  window.addEventListener("unhandledrejection", function(){ try { toast("RELAY ERROR", "", "#c97a00"); } catch(x){} });
   var loc = null, lastPos = null, tab = "MAP", scanning = false;
   var data = {}, status = {}, missing = {}, session = {score:0, finds:0, start:Date.now(), dist:0};
-  var last = {}, busy = {};
+  var last = {}, busy = {}, dead = {};
   LAYERS.forEach(function(l){ data[l.key] = []; status[l.key] = "WAIT"; });
   GROUPS.aircraft.every = S.air;
+
+  // Plain words for each optional server key, used by the settings pane.
+  var KEY_SRC = {
+    N2YO_KEY: "free key from n2yo.com",
+    AISSTREAM_KEY: "free key from aisstream.io",
+    WIGLE_AUTH: "the \"Encoded for use\" value from your WiGLE account API page"
+  };
 
   function esc(s){ return String(s == null ? "" : s).replace(/[&<>"]/g, function(c){ return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]; }); }
 
@@ -223,20 +244,28 @@ select,.btn{font-family:inherit;font-size:11px;padding:5px 8px;border:1px solid 
 
   // ---------- scoring ----------
   function toast(msg, pts, color){
+    var box = $("toasts");
+    if (!box) return;
     var d = document.createElement("div");
     d.className = "toast";
     d.style.borderColor = color;
     d.innerHTML = '<span>'+esc(msg)+'</span><span style="color:'+color+'">'+pts+'</span>';
-    var box = $("toasts");
     box.insertBefore(d, box.firstChild);
     while (box.children.length > 5) box.removeChild(box.lastChild);
     setTimeout(function(){ d.remove(); }, 3200);
   }
 
+  // Small deterministic string hash, so the same network always scores the same.
+  function hash(s){
+    var h = 0, x = String(s == null ? "" : s);
+    for (var i = 0; i < x.length; i++){ h = (h * 31 + x.charCodeAt(i)) | 0; }
+    return Math.abs(h);
+  }
+
   function pointsFor(l, it){
     if (l.key === "aircraft") return it.alt > 30000 ? 30 : it.alt > 10000 ? 55 : 80;
-    if (l.key === "wifi") return 5 + Math.floor(Math.random() * 11);
-    if (l.key === "bt") return 5 + Math.floor(Math.random() * 16);
+    if (l.key === "wifi") return 5 + (hash(it.id) % 11);
+    if (l.key === "bt") return 5 + (hash(it.id) % 16);
     return l.value || 10;
   }
 
@@ -255,7 +284,19 @@ select,.btn{font-family:inherit;font-size:11px;padding:5px 8px;border:1px solid 
 
   // ---------- relay calls ----------
   function q(){ return "lat=" + loc.lat.toFixed(3) + "&lon=" + loc.lon.toFixed(3); }
-  function get(url){ return fetch(url).then(function(r){ return r.json(); }); }
+  var GET_TIMEOUT = 20000;
+  // Always resolves, never rejects. Resolves {error:"network"} on timeout, HTTP error
+  // or a body that is not JSON, so every caller can treat a failed relay as data.
+  function get(url){
+    var ctl = null, t = null;
+    try { ctl = new AbortController(); } catch(e){ ctl = null; }
+    if (ctl) t = setTimeout(function(){ try { ctl.abort(); } catch(e){} }, GET_TIMEOUT);
+    var clear = function(){ if (t){ clearTimeout(t); t = null; } };
+    return fetch(url, ctl ? {signal: ctl.signal} : undefined).then(function(r){
+      if (!r.ok) return {error:"network"};
+      return r.json().catch(function(){ return {error:"network"}; });
+    }).catch(function(){ return {error:"network"}; }).then(function(d){ clear(); return d; });
+  }
 
   function setLayer(key, list, err){
     if (err){ status[key] = err; renderSide(); return; }
@@ -267,7 +308,7 @@ select,.btn{font-family:inherit;font-size:11px;padding:5px 8px;border:1px solid 
 
   function errOf(d){
     if (!d) return "ERROR";
-    if (d.error === "key"){ missing[d.missing] = true; return "NO KEY"; }
+    if (d.error === "key"){ if (d.missing) missing[d.missing] = d.hint || true; renderKeys(); return "NO KEY"; }
     if (d.error === "outside coverage") return "US ONLY";
     if (d.error) return "RETRY";
     return null;
@@ -285,27 +326,50 @@ select,.btn{font-family:inherit;font-size:11px;padding:5px 8px;border:1px solid 
     weather: function(){ return get("/api/weather?" + q()).then(function(d){ setLayer("weather", d.items || [], errOf(d)); }); },
     sats: function(){ return get("/api/sats?" + q()).then(function(d){
       var e = errOf(d);
-      GROUPS.sats.layers.forEach(function(k){ if (S.on[k]) setLayer(k, (d.sats && d.sats[k]) || [], e); });
+      GROUPS.sats.layers.forEach(function(k){
+        var list = (d.sats && d.sats[k]) || [];
+        if (S.on[k]) setLayer(k, list, e);
+        else status[k] = e || "OK"; // status stays honest even when the layer is off
+      });
     }); }
   };
   function osm(kind, key){ return get("/api/osm?kind=" + kind + "&" + q()).then(function(d){ setLayer(key, d.items || [], errOf(d)); }); }
 
   function groupOn(g){ return GROUPS[g].layers.some(function(k){ return S.on[k]; }); }
 
+  // A group is dead when every one of its enabled layers says NO KEY. Nothing on the
+  // client can fix that, so stop spending requests on it until RETRY KEYS is pressed.
+  function groupDead(g){
+    var seen = 0;
+    return GROUPS[g].layers.every(function(k){
+      if (!S.on[k]) return true;
+      seen++;
+      return status[k] === "NO KEY";
+    }) && seen > 0;
+  }
+
+  function doneRun(g){
+    busy[g] = false;
+    if (groupDead(g)) dead[g] = true;
+    save(); renderSide(); if (tab !== "MAP") renderPanes();
+  }
+
   function runGroup(g){
-    if (busy[g] || !loc || !groupOn(g)) return Promise.resolve();
+    if (dead[g] || busy[g] || !loc || !groupOn(g)) return Promise.resolve();
     busy[g] = true;
     last[g] = Date.now();
-    return RUN[g]().catch(function(){
+    return RUN[g]().then(function(){ doneRun(g); }, function(){
+      busy[g] = false;
       GROUPS[g].layers.forEach(function(k){ status[k] = "RETRY"; });
-    }).then(function(){ busy[g] = false; save(); renderSide(); if (tab !== "MAP") renderPanes(); });
+      save(); renderSide(); if (tab !== "MAP") renderPanes();
+    });
   }
 
   function tick(){
     if (!document.hidden && loc){
       var now = Date.now(), i = 0;
       Object.keys(GROUPS).forEach(function(g){
-        if (!groupOn(g) || busy[g]) return;
+        if (dead[g] || !groupOn(g) || busy[g]) return;
         if (!last[g] || now - last[g] >= GROUPS[g].every * 1000){
           // stagger first loads so the relays are not hit all at once
           var wait = last[g] ? 0 : i++ * 700;
@@ -319,7 +383,7 @@ select,.btn{font-family:inherit;font-size:11px;padding:5px 8px;border:1px solid 
 
   // ---------- manual scan: wifi and bluetooth ----------
   function today(){ var d = new Date(); return d.getFullYear() + "-" + (d.getMonth() + 1) + "-" + d.getDate(); }
-  function scansLeft(){ if (S.scans.day !== today()){ S.scans = {day:today(), n:0}; } return DAILY_SCANS - S.scans.n; }
+  function scansLeft(){ if (S.scans.day !== today()){ S.scans = {day:today(), n:0}; save(); } return DAILY_SCANS - S.scans.n; }
 
   $("scanBtn").onclick = function(){
     if (scanning) return;
@@ -347,6 +411,17 @@ select,.btn{font-family:inherit;font-size:11px;padding:5px 8px;border:1px solid 
     });
   };
 
+  // ---------- top bar: missing key indicator ----------
+  function renderKeys(){
+    var el = $("keysMiss");
+    if (!el) return;
+    var ks = Object.keys(missing);
+    if (!ks.length){ el.style.display = "none"; el.innerHTML = ""; el.title = ""; return; }
+    el.style.display = "flex";
+    el.title = "Missing server keys: " + ks.join(", ");
+    el.innerHTML = '<span style="color:var(--red);letter-spacing:2px">KEYS MISSING</span>';
+  }
+
   // ---------- side panel ----------
   function renderSide(){
     $("sigs").innerHTML = LAYERS.map(function(l){
@@ -367,6 +442,7 @@ select,.btn{font-family:inherit;font-size:11px;padding:5px 8px;border:1px solid 
     ];
     $("sessionRows").innerHTML = rows.map(function(r){ return '<div class="row"><span>'+r[0]+'</span><span style="color:'+r[2]+'">'+r[1]+'</span></div>'; }).join("");
     $("score").textContent = S.score.toLocaleString() + " PTS";
+    renderKeys();
     renderBars();
   }
 
@@ -429,6 +505,7 @@ select,.btn{font-family:inherit;font-size:11px;padding:5px 8px;border:1px solid 
   ];
 
   function renderPanes(){
+    if (tab === "MAP") return;
     if (tab === "LOGBOOK"){
       var h = '<div class="card"><h3>// LOGBOOK</h3>';
       if (!S.log.length) h += '<div class="empty">Finds land here the first time they show up in range.</div>';
@@ -462,11 +539,25 @@ select,.btn{font-family:inherit;font-size:11px;padding:5px 8px;border:1px solid 
         o += '<div class="row"><span>'+l.label+'</span><span style="color:'+(st==="OK"?"var(--green)":st==="OFF"?"var(--dim)":"var(--red)")+'">'+st+'</span></div>';
       });
       var miss = Object.keys(missing);
-      if (miss.length) o += '<div class="empty">Server keys not set yet: '+miss.join(", ")+'</div>';
+      if (miss.length){
+        o += '<div class="empty">These feeds need a server key. Everything else keeps working, those layers just stay empty.</div>';
+        miss.forEach(function(k){
+          o += '<div class="row"><span style="color:var(--red)">'+esc(k)+'</span><span style="color:var(--dim);font-weight:400;text-align:right">'+esc(KEY_SRC[k] || "set it in the Vercel project environment")+'</span></div>';
+        });
+        o += '<div class="opt"><span>KEYS ADDED IN VERCEL</span><button class="btn" id="retryKeys">RETRY KEYS</button></div>';
+      }
       $("setPane").innerHTML = o + '</div>';
       $("airSel").onchange = function(){ S.air = parseInt(this.value, 10); GROUPS.aircraft.every = S.air; save(); };
       $("nmSel").onchange = function(){ S.nm = parseInt(this.value, 10); save(); runGroup("aircraft"); };
       $("folSel").onchange = function(){ S.follow = this.value === "1"; save(); };
+      var rk = $("retryKeys");
+      if (rk) rk.onclick = function(){
+        var wasDead = dead;
+        dead = {}; missing = {};
+        LAYERS.forEach(function(l){ status[l.key] = "WAIT"; });
+        Object.keys(wasDead).forEach(function(g){ last[g] = 0; });
+        save(); renderSide(); renderPanes(); tick();
+      };
       $("wipeBtn").onclick = function(){
         if (!confirm("Wipe the logbook and score?")) return;
         var on = S.on; S = fresh(); S.on = on; save();

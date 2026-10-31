@@ -1,4 +1,4 @@
-// Mission Operator v2026.10.15 aircraft relay
+// Mission Operator v2026.10.31 aircraft relay
 // Snaps the requested point to a grid cell so nearby requests share one cached answer,
 // then lets the Vercel edge cache serve repeats instead of calling the upstream feed again.
 
@@ -6,6 +6,16 @@ const SOURCES = [
   (lat, lon, nm) => `https://api.adsb.lol/v2/point/${lat}/${lon}/${nm}`,
   (lat, lon, nm) => `https://api.airplanes.live/v2/point/${lat}/${lon}/${nm}`,
 ];
+
+async function fetchT(url, opts, ms) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms || 8000);
+  try {
+    return await fetch(url, Object.assign({}, opts, { signal: c.signal }));
+  } finally {
+    clearTimeout(t);
+  }
+}
 
 function snap(v) {
   return Math.round(v * 4) / 4;
@@ -16,7 +26,7 @@ module.exports = async function handler(req, res) {
   const lon = parseFloat(req.query.lon);
   let nm = parseInt(req.query.nm, 10);
   if (!isFinite(lat) || !isFinite(lon)) {
-    res.status(400).json({ error: "lat and lon required" });
+    res.status(400).json({ error: "lat and lon required", hint: "send lat and lon in decimal degrees", aircraft: [] });
     return;
   }
   if (!isFinite(nm) || nm < 10) nm = 60;
@@ -27,7 +37,7 @@ module.exports = async function handler(req, res) {
 
   for (const build of SOURCES) {
     try {
-      const r = await fetch(build(sLat, sLon, nm), { headers: { "User-Agent": "mission-operator" } });
+      const r = await fetchT(build(sLat, sLon, nm), { headers: { "User-Agent": "mission-operator" } }, 6000);
       if (!r.ok) continue;
       const data = await r.json();
       const list = (data.ac || data.aircraft || [])
@@ -49,5 +59,5 @@ module.exports = async function handler(req, res) {
     }
   }
   res.setHeader("Cache-Control", "public, s-maxage=30");
-  res.status(502).json({ error: "feed unavailable", aircraft: [] });
+  res.status(502).json({ error: "feed unavailable", hint: "both flight feeds timed out or refused, try again shortly", aircraft: [] });
 };

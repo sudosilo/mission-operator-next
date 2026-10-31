@@ -2,6 +2,16 @@
 // National Weather Service stations near the player with their latest observation.
 // US coverage only. Cached for ten minutes per grid cell.
 
+async function fetchT(url, opts, ms) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms || 8000);
+  try {
+    return await fetch(url, Object.assign({}, opts, { signal: c.signal }));
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 function snap(v) {
   return Math.round(v * 4) / 4;
 }
@@ -12,16 +22,16 @@ module.exports = async function handler(req, res) {
   const lat = parseFloat(req.query.lat);
   const lon = parseFloat(req.query.lon);
   if (!isFinite(lat) || !isFinite(lon)) {
-    res.status(400).json({ error: "lat and lon required", items: [] });
+    res.status(400).json({ error: "lat and lon required", hint: "send lat and lon in decimal degrees", items: [] });
     return;
   }
   const sLat = snap(lat);
   const sLon = snap(lon);
   try {
-    const p = await fetch(`https://api.weather.gov/points/${sLat.toFixed(4)},${sLon.toFixed(4)}`, { headers: H });
+    const p = await fetchT(`https://api.weather.gov/points/${sLat.toFixed(4)},${sLon.toFixed(4)}`, { headers: H }, 8000);
     if (!p.ok) throw new Error("points " + p.status);
     const pd = await p.json();
-    const st = await fetch(pd.properties.observationStations, { headers: H });
+    const st = await fetchT(pd.properties.observationStations, { headers: H }, 8000);
     const sd = await st.json();
     const stations = (sd.features || []).slice(0, 8);
     const items = await Promise.all(stations.map(async (s) => {
@@ -29,7 +39,7 @@ module.exports = async function handler(req, res) {
       const c = s.geometry.coordinates;
       const base = { id: sid, name: s.properties.name, lat: c[1], lon: c[0], tempF: null, wind: null, humidity: null, desc: "" };
       try {
-        const o = await fetch(`https://api.weather.gov/stations/${sid}/observations/latest`, { headers: H });
+        const o = await fetchT(`https://api.weather.gov/stations/${sid}/observations/latest`, { headers: H }, 5000);
         const op = (await o.json()).properties || {};
         const tc = op.temperature && op.temperature.value;
         base.tempF = tc != null ? Math.round(tc * 9 / 5 + 32) : null;
@@ -43,6 +53,6 @@ module.exports = async function handler(req, res) {
     res.status(200).json({ cell: [sLat, sLon], items });
   } catch (e) {
     res.setHeader("Cache-Control", "public, s-maxage=300");
-    res.status(200).json({ error: "outside coverage", items: [] });
+    res.status(200).json({ error: "outside coverage", hint: "weather stations only come from the US National Weather Service", items: [] });
   }
 };

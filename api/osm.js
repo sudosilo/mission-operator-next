@@ -2,6 +2,16 @@
 // One endpoint for cell masts, rail stations, portals and ports.
 // Snaps the point to a grid so nearby players share one cached Overpass answer.
 
+async function fetchT(url, opts, ms) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms || 8000);
+  try {
+    return await fetch(url, Object.assign({}, opts, { signal: c.signal }));
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 const MIRRORS = [
   "https://overpass-api.de/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
@@ -19,12 +29,18 @@ function snap(v, g) {
   return Math.round(v / g) * g;
 }
 
+// Total time this handler may spend on mirrors, so one slow mirror cannot eat the
+// whole function limit before the next one is tried.
+const BUDGET_MS = 18000;
+const PER_MIRROR_MS = 12000;
+
 module.exports = async function handler(req, res) {
+  const started = Date.now();
   const kind = KINDS[req.query.kind];
   const lat = parseFloat(req.query.lat);
   const lon = parseFloat(req.query.lon);
   if (!kind || !isFinite(lat) || !isFinite(lon)) {
-    res.status(400).json({ error: "kind, lat and lon required", items: [] });
+    res.status(400).json({ error: "kind, lat and lon required", hint: "kind must be cell, rail, portal or port and lat and lon in decimal degrees", items: [] });
     return;
   }
   const sLat = +snap(lat, kind.grid).toFixed(3);
@@ -34,12 +50,14 @@ module.exports = async function handler(req, res) {
   const query = `[out:json][timeout:20];(${kind.q(bbox)});out center ${kind.limit * 3};`;
 
   for (const url of MIRRORS) {
+    const left = BUDGET_MS - (Date.now() - started);
+    if (left < 1500) break;
     try {
-      const r = await fetch(url, {
+      const r = await fetchT(url, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded", "User-Agent": "mission-operator" },
         body: "data=" + encodeURIComponent(query),
-      });
+      }, Math.min(PER_MIRROR_MS, left));
       if (!r.ok) continue;
       const data = await r.json();
       const items = (data.elements || [])
@@ -59,5 +77,5 @@ module.exports = async function handler(req, res) {
     }
   }
   res.setHeader("Cache-Control", "public, s-maxage=60");
-  res.status(502).json({ error: "feed unavailable", items: [] });
+  res.status(502).json({ error: "feed unavailable", hint: "the Overpass mirrors timed out or refused, try again shortly", items: [] });
 };
